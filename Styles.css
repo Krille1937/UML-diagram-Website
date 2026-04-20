@@ -176,10 +176,25 @@ body {
     flex-direction: column;
     gap: 5px;
 }
-.legend-row {}
-.legend-line {}
-.legend-dashed {}
-.legend-arrow {}
+.legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 10px;
+    color: var(--text-secondary)
+}
+.legend-line {
+    stroke: var(--text-secondary);
+    stroke-width: 1;
+}
+.legend-dashed {
+    stroke-dasharray: 4 2;
+}
+.legend-arrow {
+    fill: var(--bg-primary);
+    stroke: var(--text-secondary);
+    stroke-width: 1.2;
+}
 
 .clear-btn {
     padding: 6px;

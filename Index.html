@@ -1,74 +1,178 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Java UML Diagram Generator</title>
-    <link rel="stylesheet" href="Styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Java UML Diagram Generator</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-    
-    <div id="app">
 
-        <!-- SIDEBAR -->
-         <div id="sidebar">
+  <div id="app">
 
-            <div id="drop-zone" onclick="document.getElementById('file-input').click()">
-                <div class="dz-icon">☕</div>
-                <span>Drop .java files<br>or click to browse</span>
-                <input type="file" id="file-input" multiple accept=".java"/>
-            </div>
+    <!-- ── SIDEBAR ──────────────────────────────────────────── -->
+    <div id="sidebar">
 
-            <div id="file-list"></div>
+      <!-- Drop zone -->
+      <div id="drop-zone" onclick="document.getElementById('file-input').click()">
+        <div class="dz-icon">☕</div>
+        <span>Drop .java files<br>or click to browse</span>
+        <input type="file" id="file-input" multiple accept=".java" />
+      </div>
 
-            <div id="bottom" style="display:none">
-                <div id="legend">
-                    <div class="legend-row">
-                        <svg width="36" height="10">
-                            <defs>
-                                <marker id="l1" viewbox="0 0 12 12" refX="11" refY="6"
-                                        markerWidth="8" markerHeight="8" orient="auto">
-                                    <path d="M1 1L11 6L1 11Z" class="legend-arrow"/>
-                                </marker>
-                            </defs>
-                            <line x1="2" y1="5" x2="28" y2="5" class="legend-line legend-dashed" marker-end="url(#12)"/>
-                        </svg>
-                        implements
-                    </div>
-                </div>
-                <button class="clear-btn" onclick="clearAll()">Clear all</button>
-            </div>
+      <!-- Loaded file list -->
+      <div id="file-list"></div>
 
-         </div>
+      <!-- ── TITLE ──────────────────────────────────────────── -->
+      <div class="sidebar-section">
+        <div class="section-label">Diagram title</div>
+        <input type="text"
+               id="title-input"
+               placeholder="e.g. Order System"
+               oninput="updateTitle(this.value)" />
+      </div>
 
-         <!-- CANVAS -->
-          <div id="canvas">
+      <!-- ── THEME ──────────────────────────────────────────── -->
+      <div class="sidebar-section">
+        <div class="section-label">Theme</div>
+        <select id="theme-select" onchange="setTheme(this.value)">
+          <option value="default">Default</option>
+          <option value="blueprint">Blueprint</option>
+          <option value="sepia">Sepia</option>
+          <option value="mono">Monochrome</option>
+        </select>
+      </div>
 
-            <svg id="diagram">
-                <defs>
-                    <marker id="m-inh" viewbox="0 0 12 12" refX="11.5" refY="6"
-                            markerWidth="10" markerHeight="10" orient="auto">
-                        <path d="M1 1L11 11Z" class="arrow-head"/>
-                    </marker>
-                </defs>
-                <g id="world"></g>
-            </svg>
+      <!-- ── MEMBERS ─────────────────────────────────────────── -->
+      <div class="sidebar-section" id="member-section" style="display:none">
+        <div class="section-label">Show members</div>
+        <label class="toggle-row">
+          <input type="checkbox" id="tog-fields"       checked onchange="toggleMember('fields',       this.checked)" />
+          Fields
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="tog-methods"      checked onchange="toggleMember('methods',      this.checked)" />
+          Methods
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="tog-constructors" checked onchange="toggleMember('constructors', this.checked)" />
+          Constructors
+        </label>
+      </div>
 
-            <div id="empty-state">
-                <div class="empty-icon">☕</div>
-                <div class="empty-title">Upload Java files to generate UML</div>
-                <div class="empty-sub">Classes, interfaces, enums - all supported</div>
-            </div>
+      <!-- ── RELATIONSHIPS ──────────────────────────────────── -->
+      <div class="sidebar-section" id="rel-section" style="display:none">
+        <div class="section-label">Show relationships</div>
+        <label class="toggle-row">
+          <input type="checkbox" id="tog-composition"  checked onchange="toggleRel('composition',  this.checked)" />
+          <span class="diamond filled"></span> Composition
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="tog-aggregation"  checked onchange="toggleRel('aggregation',  this.checked)" />
+          <span class="diamond hollow"></span> Aggregation
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="tog-depUse"       checked onchange="toggleRel('depUse',       this.checked)" />
+          <span class="dep-line"></span> Dependency «use»
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="tog-depCreates"   checked onchange="toggleRel('depCreates',   this.checked)" />
+          <span class="dep-line dashed"></span> Dependency «creates»
+        </label>
+      </div>
 
-            <div id="toolbar">
-                <button class="tb-btn" onclick="fitView()">⊡ Fit</button>
-                <button class="tb-btn" onclick="zoom(1.2)">+</button>
-                <button class="tb-btn" onclick="zoom(0.8)">-</button>
-            </div>
+      <!-- ── EXPORT ─────────────────────────────────────────── -->
+      <div class="sidebar-section" id="export-section" style="display:none">
+        <div class="section-label">Export</div>
+        <div class="btn-row">
+          <button class="export-btn" onclick="exportSVG()">SVG</button>
+          <button class="export-btn" onclick="exportPNG()">PNG</button>
+        </div>
+      </div>
 
-          </div>
-    </div>
+      <!-- ── LEGEND + CLEAR ─────────────────────────────────── -->
+      <div id="bottom" style="display:none">
+        <!-- Legend is populated dynamically by updateLegend() in script.js.
+             Only relationship types actually present in the loaded diagram
+             are shown, each with an inline SVG that matches the arrow style. -->
+        <div id="legend"></div>
+        <button class="clear-btn" onclick="clearAll()">Clear all</button>
+      </div>
 
-    <script src="Script.js"></script>
+    </div><!-- /sidebar -->
+
+    <!-- ── CANVAS ───────────────────────────────────────────── -->
+    <div id="canvas">
+
+      <svg id="diagram">
+        <!--
+          Inline <style> is required here so that CSS custom properties
+          (--bg-primary, --text-primary, etc.) resolve correctly inside
+          <marker> elements. External stylesheets do not reliably cascade
+          into the isolated marker rendering context across all browsers.
+        -->
+        <style>
+          .m-head-fill   { fill: var(--bg-primary,#fff);      stroke: var(--text-primary,#1a1a18); stroke-opacity:0.45; stroke-width:1.2; }
+          .m-comp-fill   { fill: var(--arrow-comp,rgba(26,26,24,.75)); stroke:none; }
+          .m-agg-fill    { fill: var(--bg-primary,#fff);      stroke: var(--arrow-agg,rgba(26,26,24,.55)); stroke-width:1.2; }
+        </style>
+        <defs>
+
+          <!-- Inheritance: hollow triangle arrowhead -->
+          <marker id="m-inh" viewBox="0 0 12 12" refX="11.5" refY="6"
+                  markerWidth="10" markerHeight="10" orient="auto">
+            <path d="M1 1L11 6L1 11Z" class="m-head-fill"/>
+          </marker>
+
+          <!-- Implementation: hollow triangle (dashed line) -->
+          <marker id="m-impl" viewBox="0 0 12 12" refX="11.5" refY="6"
+                  markerWidth="10" markerHeight="10" orient="auto">
+            <path d="M1 1L11 6L1 11Z" class="m-head-fill"/>
+          </marker>
+
+          <!--
+            Composition: filled diamond at the owner end.
+            orient="auto-start-reverse" flips the marker at marker-start so
+            the diamond tip correctly touches the source box edge.
+          -->
+          <marker id="m-comp" viewBox="0 0 22 12" refX="21" refY="6"
+                  markerWidth="16" markerHeight="12" orient="auto-start-reverse">
+            <path d="M1 6 L10 1 L19 6 L10 11 Z" class="m-comp-fill"/>
+          </marker>
+
+          <!-- Aggregation: hollow diamond at the owner end -->
+          <marker id="m-agg" viewBox="0 0 22 12" refX="21" refY="6"
+                  markerWidth="16" markerHeight="12" orient="auto-start-reverse">
+            <path d="M1 6 L10 1 L19 6 L10 11 Z" class="m-agg-fill"/>
+          </marker>
+
+          <!-- Dependency: small open arrowhead (context-stroke inherits line colour) -->
+          <marker id="m-dep" viewBox="0 0 10 10" refX="8" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M1 1.5L8 5L1 8.5" fill="none" stroke="context-stroke"
+                  stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </marker>
+
+        </defs>
+        <g id="world"></g>
+      </svg>
+
+      <div id="empty-state">
+        <div class="empty-icon">☕</div>
+        <div class="empty-title">Upload Java files to generate UML</div>
+        <div class="empty-sub">Classes, interfaces, enums — all supported</div>
+      </div>
+
+      <div id="toolbar">
+        <button class="tb-btn" onclick="fitView()">⊡ Fit</button>
+        <button class="tb-btn" onclick="zoom(1.2)">+</button>
+        <button class="tb-btn" onclick="zoom(0.83)">−</button>
+      </div>
+
+    </div><!-- /canvas -->
+
+  </div><!-- /app -->
+
+  <script src="script.js"></script>
 </body>
 </html>

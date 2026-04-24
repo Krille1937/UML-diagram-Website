@@ -43,7 +43,19 @@
         </select>
       </div>
 
-      <!-- ── MEMBERS ─────────────────────────────────────────── -->
+      <!-- ── SECTIONS ───────────────────────────────────────── -->
+      <div class="sidebar-section" id="sections-panel">
+        <div class="section-label">Canvas sections</div>
+        <div id="section-list"></div>
+        <div id="section-add-row">
+          <input type="text" id="section-name-input"
+                  placeholder="Section name…"
+                  onkeydown="if(event.key==='Enter') addSection()" />
+          <button class="section-add-btn" onclick="addSection()">+</button>
+        </div>
+      </div>
+
+      <!-- ── MEMBERS ────────────────────────────────────────── -->
       <div class="sidebar-section" id="member-section" style="display:none">
         <div class="section-label">Show members</div>
         <label class="toggle-row">

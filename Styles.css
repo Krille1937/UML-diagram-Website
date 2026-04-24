@@ -215,6 +215,40 @@
   --uml-sep:          #999999;
 }
 
+/* UML BOX DRAG CURSORS */
+.uml-box {
+  cursor: -webkit-grab;
+  cursor: grab;
+}
+
+.bend-handle {
+  fill: var(--accent);
+  stroke: var(--bg-primary);
+  stroke-width: 1.5;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: all;
+}
+
+/* Axis-aware cursors: vertical elbows move up/down, horizontal move left/right */
+.bend-handle[data-bend-axis="vertical"],
+.bend-handle[data-bend-axis="horizontal"] { cursor: grab; }
+
+#diagram:hover .bend-handle { opacity: 0.45; }
+#diagram:hover .bend-handle:hover { opacity: 1; r: 6; }
+
+/* Lock cursor to the correct axis while a bend drag is active */
+#diagram.dragging-bend-v,
+#diagram.dragging-bend-v *,
+#diagram.dragging-bend-h,
+#diagram.dragging-bend-h * { cursor: none !important; }
+
+#diagram.dragging-box,
+#diagram.dragging-box .uml-box {
+  cursor: -webkit-grabbing !important;
+  cursor: grabbing !important;
+}
+
 body {
   background: var(--bg-tertiary);
   height: 100vh;
@@ -293,6 +327,109 @@ body {
 .file-item .file-name         { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; flex: 1; }
 .file-item .remove-btn        { opacity: 0; background: none; border: none; cursor: pointer; color: var(--text-secondary); font-size: 16px; line-height: 1; padding: 0 2px; flex-shrink: 0; transition: opacity 0.15s; }
 .file-item:hover .remove-btn  { opacity: 1; }
+
+.file-item .section-select {
+  font-size: 10px;
+  background: var(--bg-tertiary);
+  border: 0.5px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  max-width: 72px;
+  padding: 1px 2px;
+  flex-shrink: 0;
+}
+
+/* ── SECTIONS PANEL ────────────────────────────────────────── */
+#section-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.section-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  min-height: 26px;
+}
+
+/* Colored swatch showing the section's tint */
+.section-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  border: 0.5px solid rgba(0, 0, 0, 0.15)
+}
+
+.section-item-name {
+  flex: 1;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  cursor: text;
+  outline: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+}
+
+.section-item-name:focus {
+  color: var(--accent);
+}
+
+.section-delete-btn {
+  opacity: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+  transition: opacity 0.15s;
+}
+.section-item:hover .section-delete-btn { opacity: 1; }
+
+/* Add-section row: text input + + button */
+#section-add-row {
+  display: flex;
+  gap: 4px;
+}
+
+#section-name-input {
+  flex: 1;
+  padding: 4px 7px;
+  font-size: 11px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  outline: none;
+}
+#section-name-input:focus { border-color: var(--accent); }
+#section-name-input::placeholder { color: var(--text-secondary); }
+
+.section-add-btn {
+  padding: 4px 9px;
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  transition: background 0.1s, color 0.1s;
+}
+.section-add-btn:hover { background: var(--accent-bg); color: var(--accent); }
 
 /* ── SIDEBAR SECTIONS ──────────────────────────────────────── */
 .sidebar-section {

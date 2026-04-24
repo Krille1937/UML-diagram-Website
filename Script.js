@@ -8,7 +8,7 @@
  * dependency «use», and dependency «creates».
  *
  * @author  Kristoffer Oltegen Diehl
- * @version 0.2.0
+ * @version 1.0.0
  */
 
 
@@ -183,6 +183,83 @@ let visMembers = {
     methods:      true,
     constructors: true,
 };
+
+/**
+ * World-coordinate position of the draggable legend box.
+ *
+ * Null until the first render with at least one relationship present,
+ * at which point it is auto-placed to the right of the class bounding box.
+ * Reset to null by {@link clearAll}.
+ *
+ * @type {{ x: number, y: number }|null}
+ */
+let legendPos = null;
+
+/**
+ * User-defined elbow offsets for individual arrows.
+ *
+ * Key format: `"fromName::toName::relType"`.
+ * Value: a number representing the pixel delta the user has dragged the bend
+ * handle away from the natural midpoint. Positive = right/down, negative = left/up.
+ *
+ * @type {Object.<string, number>}
+ */
+const bendOffsets = {};
+
+/**
+ * Cache of the last-rendered edge axis ('vertical' | 'horizontal') for each
+ * arrow, keyed the same way as {@link bendOffsets}.
+ *
+ * Used to detect when a box drag causes an arrow's routing axis to flip, at
+ * which point the stored bend offset is no longer meaningful and is discarded.
+ *
+ * @type {Object.<string, string>}
+ */
+const bendEdgeCache = {};
+
+/**
+ * All named canvas sections, ordered by creation time.
+ *
+ * @type {Array<{id: string, name: string, color: string}>}
+ */
+let sections = [];
+
+/**
+ * Maps each class name to the id of the section it belongs to, or null.
+ *
+ * @type {Object.<string, string|null>}
+ */
+let sectionAssignments = {};
+
+/**
+ * Cycling palette of muted tint colors for section backgrounds.
+ * Each value is used as a semi-transparent fill on the canvas.
+ *
+ * @const {string[]}
+ */
+const SECTION_PALETTE = [
+    'rgba(99,149,221,0.10)',   // blue
+    'rgba(99,180,120,0.10)',   // green
+    'rgba(221,149,99,0.10)',   // orange
+    'rgba(180,99,180,0.10)',   // purple
+    'rgba(180,160,60,0.10)',   // gold
+    'rgba(99,180,180,0.10)',   // teal
+];
+
+/**
+ * Solid border colors matching each SECTION_PALETTE entry, used for the
+ * section outline and the swatch in the sidebar.
+ *
+ * @const {string[]}
+ */
+const SECTION_BORDER = [
+    'rgba(99,149,221,0.45)',
+    'rgba(99,180,120,0.45)',
+    'rgba(221,149,99,0.45)',
+    'rgba(180,99,180,0.45)',
+    'rgba(180,160,60,0.45)',
+    'rgba(99,180,180,0.45)',
+];
 
 
 // ════════════════════════════════════════════════════════════════
@@ -1159,6 +1236,165 @@ function calcDimensions(cls) {
 
 
 // ════════════════════════════════════════════════════════════════
+//  SECTIONS
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * Build SVG markup for all canvas sections.
+ *
+ * Each section is drawn as a rounded rectangle that auto-fits around all
+ * class boxes assigned to it, plus a fixed padding. The label is placed in
+ * the top-left corner of the rectangle. Sections with no assigned classes
+ * (or no positioned boxes) are silently skipped.
+ *
+ * Sections are drawn before arrows and class boxes so they appear as a
+ * background layer.
+ *
+ * @returns {string} Concatenated SVG elements as an HTML string fragment
+ */
+function renderSections() {
+    const PAD       = 20;   // padding around class boxes inside the section
+    const LABEL_H   = 20;   // vertical space reserved for the label above the boxes
+    let svg = '';
+ 
+    sections.forEach((sec, idx) => {
+        const fill   = SECTION_PALETTE[idx % SECTION_PALETTE.length];
+        const stroke = SECTION_BORDER[idx % SECTION_BORDER.length];
+ 
+        // Collect positions of all assigned, positioned classes.
+        const assigned = Object.keys(sectionAssignments).filter(
+            n => sectionAssignments[n] === sec.id && positions[n] && dims[n]
+        );
+        if (!assigned.length) return;
+ 
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        assigned.forEach(n => {
+            const p = positions[n], d = dims[n];
+            minX = Math.min(minX, p.x);
+            minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x + d.w);
+            maxY = Math.max(maxY, p.y + d.h);
+        });
+ 
+        const rx = minX - PAD;
+        const ry = minY - PAD - LABEL_H;
+        const rw = (maxX - minX) + PAD * 2;
+        const rh = (maxY - minY) + PAD * 2 + LABEL_H;
+ 
+        // Background rectangle
+        svg += `<rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" rx="8"
+                      fill="${fill}"
+                      stroke="${stroke}" stroke-width="1.2"/>`;
+ 
+        // Label
+        svg += `<text x="${rx + 10}" y="${ry + LABEL_H * 0.72}"
+                      font-family="sans-serif" font-size="11" font-weight="600"
+                      fill="${stroke.replace('0.45', '0.85')}">${escapeXml(sec.name)}</text>`;
+ 
+        // Thin separator line below the label
+        svg += `<line x1="${rx + 6}" y1="${ry + LABEL_H}"
+                      x2="${rx + rw - 6}" y2="${ry + LABEL_H}"
+                      stroke="${stroke}" stroke-width="0.5"/>`;
+    });
+ 
+    return svg;
+}
+
+
+/**
+ * Add a new section with the name currently typed in the sidebar input.
+ *
+ * If the name is empty or whitespace-only, the call is silently ignored.
+ * The input is cleared after a successful add.
+ *
+ * @returns {void}
+ */
+function addSection() {
+    const input = document.getElementById('section-name-input');
+    const name = input.value.trim();
+    if (!name) return;
+
+    const id = `sec_${Date.now()}`;
+    sections.push({ id, name });
+    input.value = '';
+    updateSectionList();
+    // Also update file-list so the new section appears in each class dropdown.
+    updateFileList();
+    render();
+}
+
+
+/**
+ * Delete a section by id, unassigning all classes that belonged to it.
+ *
+ * @param  {string} id - Section id to delete
+ * @returns {void}
+ */
+function deleteSection(id) {
+    sections = sections.filter(s => s.id !== id);
+    Object.keys(sectionAssignments).forEach(cls => {
+        if (sectionAssignments[cls] === id) sectionAssignments[cls] = null;
+    });
+    updateSectionList();
+    updateFileList();
+    render();
+}
+
+
+/**
+ * Rename a section in response to an inline edit in the sidebar.
+ *
+ * @param  {string} id   - Section id to rename
+ * @param  {string} name - New name (trimmed by the caller)
+ * @returns {void}
+ */
+function renameSection(id, name) {
+    const sec = sections.find(s => s.id === id);
+    if (sec) { sec.name = name; render(); }
+}
+
+
+/**
+ * Assign or unassign a class to a section.
+ *
+ * @param  {string}      className - Class name key in {@link classMap}
+ * @param  {string|null} sectionId - Section id to assign, or '' / null to unassign
+ * @returns {void}
+ */
+function assignClassToSection(className, sectionId) {
+    sectionAssignments[className] = sectionId || null;
+    render();
+}
+
+
+/**
+ * Rebuild the section list in the sidebar from the current {@link sections} array.
+ *
+ * Each row shows a color swatch, an editable name input, and a delete button.
+ *
+ * @returns {void}
+ */
+function updateSectionList() {
+    const list = document.getElementById('section-list');
+    list.innerHTML = sections.map((sec, idx) => {
+        const swatch = SECTION_BORDER[idx % SECTION_BORDER.length];
+        return `
+        <div class="section-item">
+            <span class="section-swatch" style="background:${swatch}"></span>
+            <input class="section-item-name"
+                   type="text"
+                   value="${escapeXml(sec.name)}"
+                   onchange="renameSection('${sec.id}', this.value.trim())"
+                   title="Click to rename" />
+            <button class="section-delete-btn"
+                    onclick="deleteSection('${sec.id}')"
+                    title="Delete section">×</button>
+        </div>`;
+    }).join('');
+}
+
+
+// ════════════════════════════════════════════════════════════════
 //  AUTO-LAYOUT
 // ════════════════════════════════════════════════════════════════
 
@@ -1253,246 +1489,404 @@ function autoLayout() {
 // ════════════════════════════════════════════════════════════════
 
 /**
- * Compute the start/end points and optional elbow segment for a relationship arrow.
- *
- * Selects the box edge pair (top/bottom or left/right) that minimises arrow length.
- * Mostly-vertical arrows include a horizontal elbow at the Y midpoint.
- *
- * The slot parameters spread multiple arrows that share the same edge so they
- * never overlap. Each arrow is assigned a fraction along the edge:
- * fraction = (slotIndex + 1) / (totalSlots + 1), so arrows distribute evenly
- * between the edges corners with a margin on each side.
- *
- * @param  {Position}      fromPos       - Top-left position of the source box
- * @param  {BoxDimensions} fromDim       - Dimensions of the source box
- * @param  {Position}      toPos         - Top-left position of the target box
- * @param  {BoxDimensions} toDim         - Dimensions of the target box
- * @param  {number}        fromSlotIdx   - Index of this arrow among all arrows leaving the same source edge
- * @param  {number}        fromSlotTotal - Total arrows leaving that source edge
- * @param  {number}        toSlotIdx     - Index of this arrow among all arrows arriving at the same target edge
- * @param  {number}        toSlotTotal   - Total arrows arriving at that target edge
- * @returns {ConnectionPoints}             Computed arrow geometry
+ * Determine which pair of box edges a connection should use.
+ * 
+ * Compares center-to-center deltas. When the vertical delta dominates the
+ * connection exits via top/bottom edges; otherwise vie left/right edges.
+ * The same logic is run for both endpoints so the edge assignments are
+ * always consistent regardless of which class is "from" and which is "to".
+ * 
+ * @param {Position} fp - Top-left position of the source box
+ * @param {BoxDimensions} fd - Dimensions of the source box
+ * @param {Position} tp - Top-left position of the target box
+ * @param {BoxDimensions} td - Dimensions of the target box
+ * @returns {{ fromEdge: string, toEdge: string }}
+ *   Each value is one of: 'top' | 'bottom' | 'left' | 'right'
  */
-function connectionPoints(fromPos, fromDim, toPos, toDim,
-                          fromSlotIdx = 0, fromSlotTotal = 1,
-                          toSlotIdx   = 0, toSlotTotal   = 1) {
-    const fCX = fromPos.x + fromDim.w / 2;
-    const fCY = fromPos.y + fromDim.h / 2;
-    const tCX = toPos.x   + toDim.w  / 2;
-    const tCY = toPos.y   + toDim.h  / 2;
-    const dx  = tCX - fCX;
-    const dy  = tCY - fCY;
-
-    // Evenly spaced fractions along each edge; single arrows default to 0.5 (centre).
-    const fromFrac = (fromSlotIdx + 1) / (fromSlotTotal + 1);
-    const toFrac   = (toSlotIdx   + 1) / (toSlotTotal   + 1);
-
-    let sx, sy, ex, ey;
+function computeEdge(fp, fd, tp, td) {
+    const dx = (tp.x + td.w / 2) - (fp.x + fd.w / 2);
+    const dy = (tp.y + td.h / 2) - (fp.y + fd.h / 2);
 
     if (Math.abs(dy) >= Math.abs(dx)) {
-        // Mostly vertical — spread contact points horizontally along top/bottom edges.
-        if (dy < 0) {
-            sx = fromPos.x + fromDim.w * fromFrac; sy = fromPos.y;             // source: top edge
-            ex = toPos.x   + toDim.w  * toFrac;    ey = toPos.y + toDim.h;   // target: bottom edge
-        } else {
-            sx = fromPos.x + fromDim.w * fromFrac; sy = fromPos.y + fromDim.h; // source: bottom edge
-            ex = toPos.x   + toDim.w  * toFrac;    ey = toPos.y;               // target: top edge
-        }
-    } else {
-        // Mostly horizontal — spread contact points vertically along left/right edges.
-        if (dx < 0) {
-            sx = fromPos.x;             sy = fromPos.y + fromDim.h * fromFrac; // source: left edge
-            ex = toPos.x + toDim.w;    ey = toPos.y   + toDim.h  * toFrac;   // target: right edge
-        } else {
-            sx = fromPos.x + fromDim.w; sy = fromPos.y + fromDim.h * fromFrac; // source: right edge
-            ex = toPos.x;               ey = toPos.y   + toDim.h  * toFrac;   // target: left edge
-        }
+        return {
+            fromEdge: dy < 0 ? 'top' : 'bottom',
+            toEdge: dy < 0 ? 'bottom' : 'top',
+        };
     }
-
-    // Add a horizontal elbow for vertical arrows to prevent diagonal lines.
-    const midY      = (sy + ey) / 2;
-    const elbowPath = Math.abs(dy) >= Math.abs(dx)
-        ? `L${sx},${midY} L${ex},${midY}`
-        : '';
-
-    return { sx, sy, ex, ey, elbowPath };
+    return {
+        fromEdge: dx < 0 ? 'left' : 'right',
+        toEdge: dx < 0 ? 'right' : 'left',
+    };
 }
 
 
 /**
- * Build SVG markup for a text label centred on a relationship arrow.
+ * Compute a single contact point on a box edge, evenly spaced among all
+ * arrows that share that edge.
  *
- * Uses ASCII angle-bracket notation (e.g. {@code <<use>>}) rather than
- * guillemet characters (« ») because guillemets may not render in all
- * monospace font stacks and can appear as '/' or replacement characters.
- * The label uses sans-serif to maximise glyph coverage.
+ * The fraction along the edge is `(slotIdx + 1) / (slotTotal + 1)`, which
+ * distributes N arrows into N equal sections with a margin at each corner.
+ * A single arrow defaults to the centre (fraction 0.5).
  *
- * @param  {ConnectionPoints} c     - Arrow geometry
- * @param  {string}           label - ASCII label text, e.g. '<<use>>' or '<<creates>>'
- * @param  {string}           color - CSS color value for the text
- * @returns {string}                  SVG markup string for the label
+ * @param  {Position}      pos       - Top-left position of the box
+ * @param  {BoxDimensions} dim       - Dimensions of the box
+ * @param  {string}        edge      - 'top' | 'bottom' | 'left' | 'right'
+ * @param  {number}        slotIdx   - Zero-based index of this arrow within the edge group
+ * @param  {number}        slotTotal - Total number of arrows on this edge
+ * @returns {{ x: number, y: number }}  Absolute SVG coordinate of the contact point
  */
-function renderArrowLabel(c, label, color) {
-    const mx = (c.sx + c.ex) / 2;
-    const my = (c.sy + c.ey) / 2 - 5;
-    return `<text x="${mx}" y="${my}"
-                  text-anchor="middle"
-                  font-family="sans-serif" font-size="9"
-                  fill="${color}" fill-opacity="0.90">${escapeXml(label)}</text>`;
+function computeContactPoint(pos, dim, edge, slotIdx, slotTotal) {
+    const frac = (slotIdx + 1) / (slotTotal + 1);
+    switch (edge) {
+        case 'top':     return { x: pos.x + dim.w * frac, y: pos.y };
+        case 'bottom':  return { x: pos.x + dim.w * frac, y: pos.y + dim.h };
+        case 'left':    return { x: pos.x,                y: pos.y + dim.h * frac };
+        case 'right':   return { x: pos.x + dim.w,        y: pos.y + dim.h * frac };
+    }
 }
 
 
 /**
- * Build the SVG markup string for all relationship arrows.
+ * Build an SVG path data string (intermediate waypoints only) for the elbow
+ * between two contact points, with snap-to-straight behaviour and user offsets.
  *
- * Uses a two-phase approach to prevent arrows from converging on the same point:
+ * **Snap-to-straight:** if the contact points are within {@code STRAIGHT_SNAP}
+ * pixels perpendicular to the route axis, the arrow is drawn as a straight
+ * diagonal line (no elbow segment returned). This keeps short connections clean.
  *
- * Phase 1 (pre-pass): Every planned connection is collected, its source and
- * target edge determined, then grouped by class+edge. Each connection is assigned
- * a slotIndex within its group so that {@link connectionPoints} can spread the
- * contact points evenly along the edge rather than stacking them at the centre.
+ * **Stagger:** when multiple arrows share the same source edge, their natural
+ * midpoints are offset by ±(slotIdx − centre) × ELBOW_STEP so they separate.
  *
- * Phase 2 (draw): Connections are drawn in visual priority order — weaker
- * relationship types first so stronger ones render on top. Within each type,
- * the draw order matches the pre-pass order so slot indices are consistent.
+ * **User offset:** the value stored in {@link bendOffsets} for this arrow is
+ * added on top of the natural midpoint, letting the user push the bend anywhere.
  *
- * @returns {string} Concatenated SVG {@code <path>} elements as an HTML string fragment
+ * **Axis invalidation:** if the routing axis has changed since the last render
+ * (box dragged from a top/bottom route to a left/right route or vice-versa),
+ * the user offset is discarded so a stale horizontal offset is not applied to
+ * a newly vertical route.
+ *
+ * @param  {{ x:number, y:number }} from      - Source contact point
+ * @param  {string}                 fromEdge  - Source edge name ('top'|'bottom'|'left'|'right')
+ * @param  {{ x:number, y:number }} to        - Target contact point
+ * @param  {string}                 toEdge    - Target edge name (for symmetry / future use)
+ * @param  {number}                 slotIdx   - Zero-based index of this arrow on the source edge
+ * @param  {number}                 slotTotal - Total arrows on the source edge
+ * @param  {string}                 bendKey   - Unique key identifying this arrow in {@link bendOffsets}
+ * @returns {{ path: string, bendPt: {x:number, y:number}|null }}
+ *   - `path`   SVG path data for the waypoints (empty string = straight line)
+ *   - `bendPt` World coordinates of the bend handle, or null for straight arrows
+ */
+function buildElbowPath(from, fromEdge, to, toEdge, slotIdx, slotTotal, bendKey) {
+    const ELBOW_STEP    = 14;   // px between parallel staggered elbows
+    const STRAIGHT_SNAP = 20;   // px perpendicular threshold — snap to straight below this
+ 
+    const isVertical = fromEdge === 'top' || fromEdge === 'bottom';
+    const axis       = isVertical ? 'vertical' : 'horizontal';
+ 
+    // Invalidate user offset when routing axis has flipped since last render.
+    if (bendEdgeCache[bendKey] && bendEdgeCache[bendKey] !== axis) {
+        delete bendOffsets[bendKey];
+    }
+    bendEdgeCache[bendKey] = axis;
+ 
+    const stagger    = (slotIdx - (slotTotal - 1) / 2) * ELBOW_STEP;
+    const userOffset = bendOffsets[bendKey] || 0;
+ 
+    if (isVertical) {
+        // Snap to straight when endpoints are already close horizontally.
+        if (Math.abs(from.x - to.x) < STRAIGHT_SNAP && userOffset === 0) {
+            return { path: '', bendPt: null };
+        }
+        const midY    = (from.y + to.y) / 2 + stagger + userOffset;
+        const bendPt  = { x: (from.x + to.x) / 2, y: midY };
+        return { path: `L${from.x},${midY} L${to.x},${midY}`, bendPt };
+    } else {
+        // Snap to straight when endpoints are already close vertically.
+        if (Math.abs(from.y - to.y) < STRAIGHT_SNAP && userOffset === 0) {
+            return { path: '', bendPt: null };
+        }
+        const midX    = (from.x + to.x) / 2 + stagger + userOffset;
+        const bendPt  = { x: midX, y: (from.y + to.y) / 2 };
+        return { path: `L${midX},${from.y} L${midX},${to.y}`, bendPt };
+    }
+}
+
+
+/**
+ * Build SVG markup for a stereotype label centred on a relationship arrow.
+ *
+ * The label is placed at the visual midpoint of the elbow path so it sits
+ * near the bend rather than at the straight-line midpoint between endpoints.
+ * Uses ASCII angle-bracket notation (`<<use>>`) for cross-platform glyph
+ * reliability, and sans-serif to maximise coverage.
+ *
+ * @param  {{ x:number, y:number }} from  - Source contact point
+ * @param  {{ x:number, y:number }} to    - Target contact point
+ * @param  {string}                 label - Label text, e.g. '<<use>>'
+ * @param  {string}                 color - CSS color value for the text fill
+ * @returns {string}                        SVG {@code <text>} element markup
+ */
+function renderArrowLabel(from, to, bendPt, label, color) {
+    const mx = bendPt ? bendPt.x : (from.x + to.x) / 2;
+    const my = (bendPt ? bendPt.y : (from.y + to.y) / 2) - 6;
+    return `<text x="${mx}" y="${my}"
+                    text-anchor="middle"
+                    font-family="sans-serif" font-size="9"
+                    fill="${color}" fill-opacity="0.90">${escapeXml(label)}</text>`;
+}
+
+
+/**
+ * Build and draw all relationship arrows for the current diagram.
+ *
+ * The pipeline has five phases:
+ *
+ * **Stage 1 — Collect** raw connections from {@link detectRelationships},
+ * implemented interfaces, and the superclass chain.
+ *
+ * **Stage 2 — Merge** bidirectional pairs. When class A and class B both
+ * have a composition (or aggregation) relationship pointing at each other,
+ * the two arrows are collapsed into one with markers at both ends. This
+ * avoids drawing two overlapping lines for mutual ownership patterns.
+ * Only structural relationship types (composition, aggregation) are merged;
+ * dependency arrows are always unidirectional.
+ *
+ * **Stage 3 — Assign edges**. For each connection, {@link computeEdge}
+ * determines which pair of box edges to connect based on the centre-to-centre
+ * direction vector. Since the same logic runs for every arrow, edges are
+ * consistent even after boxes are dragged.
+ *
+ * **Stage 4 — Slot assignment**. Connections are grouped by `className-edge`
+ * key. Within each group every connection is assigned an integer slot index
+ * (0…n-1). {@link computeContactPoint} then maps each index to an evenly
+ * spaced position along the edge so no two arrows share the same anchor point.
+ *
+ * **Stage 5 — Draw**. Arrows are drawn in increasing visual strength order
+ * (weakest first, strongest last) so stronger lines appear on top.
+ * {@link buildElbowPath} staggers parallel elbows so they separate visually.
+ *
+ * @returns {string} Concatenated SVG elements as an HTML string fragment
  */
 function renderArrows() {
 
-    // ── Phase 1: collect all planned connections ─────────────────────────────
+    // Stage 1: collect raw connections
 
-    /** @type {Array<{fromName:string, toName:string, relType:string, fromEdge:string, toEdge:string, fromSlotIdx:number, fromSlotTotal:number, toSlotIdx:number, toSlotTotal:number}>} */
-    const connections = [];
+    /**
+     * @typedef     {Object}    RawConn
+     * @property    {string}    fromName - Source class name
+     * @property    {string}    toName   - Target class name
+     * @property    {string}    relType  - Relationship type identifier
+     * @property    {boolean}   bidir    - True when this is a merged bidirectional arrow
+     */
+
+    /** @type {RawConn[]} */
+    const rawConns = [];
 
     Object.keys(classMap).forEach(fromName => {
-        const cls     = classMap[fromName];
-        const fromPos = positions[fromName];
-        const fromDim = dims[fromName];
-        if (!fromPos || !fromDim) return;
+        const cls = classMap[fromName];
+        if (!positions[fromName] || !dims[fromName]) return;
 
-        // Detected structural / dependency relationships (weakest, drawn first)
+        // Structural & dependency relationship (weakest - drawn first)
         detectRelationships(fromName).forEach(rel => {
             if (!visRelationships[rel.type]) return;
-            if (!classMap[rel.target] || !positions[rel.target]) return;
-            connections.push({ fromName, toName: rel.target, relType: rel.type });
+            if (!positions[rel.target] || !dims[rel.target]) return;
+            rawConns.push({ fromName, toName: rel.target, relType: rel.type, bidir: false });
         });
 
-        // Implementation (dashed inheritance — medium strength)
+        // Implementation - medium strength
         cls.interfaces.forEach(ifc => {
-            if (!classMap[ifc] || !positions[ifc]) return;
-            connections.push({ fromName, toName: ifc, relType: 'implementation' });
+            if (!classMap[ifc] || !positions[ifc] || !dims[ifc]) return;
+            rawConns.push({ fromName, toName: ifc, relType: 'implementation', bidir: false });
         });
 
-        // Inheritance (solid — strongest, drawn last / on top)
-        if (cls.extendsClass && classMap[cls.extendsClass] && positions[cls.extendsClass]) {
-            connections.push({ fromName, toName: cls.extendsClass, relType: 'inheritance' });
+        // Inheritance - strongest, drawn on top
+        if (cls.extendsClass && classMap[cls.extendsClass]
+                && positions[cls.extendsClass] && dims[cls.extendsClass]) {
+            rawConns.push({ fromName, toName: cls.extendsClass, relType: 'inheritance', bidir: false });
         }
     });
 
-    // ── Determine which edge each connection uses at both ends ───────────────
-    // Guard: skip any connection where positions or dims are not yet cached.
-    // This prevents TypeError when boxes are mid-drag and dims are momentarily stale.
+    // Stage 2: merge bidirectional structural pairs
 
-    const validConnections = connections.filter(conn => {
-        return positions[conn.fromName] && dims[conn.fromName]
-            && positions[conn.toName]   && dims[conn.toName];
-    });
+    const MERGABLE = new Set(['composition', 'aggregation']);
+    const mergedAway = new Set();  // indices of rawConns that were absorbed
+    /** @type {RawConn[]} */
+    const connections = [];
 
-    validConnections.forEach(conn => {
-        const fp = positions[conn.fromName], fd = dims[conn.fromName];
-        const tp = positions[conn.toName],   td = dims[conn.toName];
-        const dx = (tp.x + td.w / 2) - (fp.x + fd.w / 2);
-        const dy = (tp.y + td.h / 2) - (fp.y + fd.h / 2);
+    rawConns.forEach((conn, i) => {
+        if (mergedAway.has(i)) return;
 
-        if (Math.abs(dy) >= Math.abs(dx)) {
-            conn.fromEdge = dy < 0 ? 'top'    : 'bottom';
-            conn.toEdge   = dy < 0 ? 'bottom' : 'top';
-        } else {
-            conn.fromEdge = dx < 0 ? 'left'   : 'right';
-            conn.toEdge   = dx < 0 ? 'right'  : 'left';
+        if (MERGABLE.has(conn.relType)) {
+            // Search forward for the reverse connection of the same type.
+            const revIdx = rawConns.findIndex((r, j) =>
+                j > i
+                && !mergedAway.has(j)
+                && r.relType === conn.relType
+                && r.fromName === conn.toName
+                && r.toName === conn.fromName
+            );
+
+            if (revIdx !== -1) {
+                // Found a matching reverse - merge both into one bidirectional entry.
+                mergedAway.add(revIdx);
+                connections.push({ ...conn, bidir: true});
+                return;
+            }
         }
+
+        connections.push({ ...conn, bidir: false});
     });
 
-    // ── Group by class+edge → assign slot indices ────────────────────────────
+    // ── Stage 3: assign edges ─────────────────────────────────────────────────
 
-    /** @type {Object.<string, number[]>} Maps "className-edge" to an array of connection indices. */
-    const toGroups   = {};
-    const fromGroups = {};
+    connections.forEach(conn => {
+        const { fromEdge, toEdge } = computeEdge(
+            positions[conn.fromName], dims[conn.fromName],
+            positions[conn.toName], dims[conn.toName]
+        );
+        conn.fromEdge = fromEdge;
+        conn.toEdge = toEdge;
+    });
 
-    validConnections.forEach((conn, idx) => {
-        const tk = `${conn.toName}-${conn.toEdge}`;
+    // ── Stage 4: slot assignment ──────────────────────────────────────────────
+    // Build a map from "className-edge" to all connections that touch that edge,
+    // then assign each connection its index within that group.
+    //
+    // Each connection occupies exactly ONE slot on the from-class edge and
+    // ONE slot on the to-class edge, regardless of whether it is bidirectional.
+
+    /**
+     * Edge group map: key is "className-edge", value is array of connection indices
+     * that have an endpoint on that edge.
+     * @type {Object.<string, Array<{idx:number, end:'from'|'to'}>>}
+     */
+    const edgeGroups = {};
+
+    connections.forEach((conn, i) => {
         const fk = `${conn.fromName}-${conn.fromEdge}`;
-        (toGroups[tk]   = toGroups[tk]   || []).push(idx);
-        (fromGroups[fk] = fromGroups[fk] || []).push(idx);
-    });
-
-    validConnections.forEach((conn, idx) => {
         const tk = `${conn.toName}-${conn.toEdge}`;
-        const fk = `${conn.fromName}-${conn.fromEdge}`;
-        conn.toSlotIdx     = toGroups[tk].indexOf(idx);
-        conn.toSlotTotal   = toGroups[tk].length;
-        conn.fromSlotIdx   = fromGroups[fk].indexOf(idx);
-        conn.fromSlotTotal = fromGroups[fk].length;
+        (edgeGroups[fk] = edgeGroups[fk] || []).push({ idx: i, end: 'from' });
+        (edgeGroups[tk] = edgeGroups[tk] || []).push({ idx: i, end: 'to'   });
+    });
+ 
+    // Sort each edge group so slot positions correspond to the spatial positions
+    // of the connected boxes — minimises line crossings.
+    // Top/bottom edges sort by the X centre of the other box.
+    // Left/right edges sort by the Y centre of the other box.
+    Object.entries(edgeGroups).forEach(([key, group]) => {
+        const edge    = key.split('-').pop();
+        const isHoriz = edge === 'top' || edge === 'bottom';
+ 
+        group.sort((a, b) => {
+            const connA  = connections[a.idx];
+            const connB  = connections[b.idx];
+            const nameA  = a.end === 'from' ? connA.toName   : connA.fromName;
+            const nameB  = b.end === 'from' ? connB.toName   : connB.fromName;
+            const pA = positions[nameA], dA = dims[nameA];
+            const pB = positions[nameB], dB = dims[nameB];
+            if (!pA || !pB) return 0;
+            return isHoriz
+                ? (pA.x + dA.w / 2) - (pB.x + dB.w / 2)
+                : (pA.y + dA.h / 2) - (pB.y + dB.h / 2);
+        });
+    });
+ 
+    connections.forEach((conn, i) => {
+        const fk     = `${conn.fromName}-${conn.fromEdge}`;
+        const tk     = `${conn.toName}-${conn.toEdge}`;
+        const fGroup = edgeGroups[fk];
+        const tGroup = edgeGroups[tk];
+ 
+        conn.fromSlotIdx   = fGroup.findIndex(e => e.idx === i && e.end === 'from');
+        conn.fromSlotTotal = fGroup.length;
+        conn.toSlotIdx     = tGroup.findIndex(e => e.idx === i && e.end === 'to');
+        conn.toSlotTotal   = tGroup.length;
     });
 
-    // ── Phase 2: draw connections in order ───────────────────────────────────
+    // Stage 5: draw
 
     let svg = '';
 
-    validConnections.forEach(conn => {
-        const c = connectionPoints(
-            positions[conn.fromName], dims[conn.fromName],
-            positions[conn.toName],   dims[conn.toName],
+    connections.forEach(conn => {
+        const fp = positions[conn.fromName], fd = dims[conn.fromName];
+        const tp = positions[conn.toName], td = dims[conn.toName];
+        
+        const from = computeContactPoint(fp, fd, conn.fromEdge, conn.fromSlotIdx, conn.fromSlotTotal);
+        const to = computeContactPoint(tp, td, conn.toEdge, conn.toSlotIdx, conn.toSlotTotal);
+        
+        // Build a stable key for this connection's bend offset and edge cache
+        const bendKey = `${conn.fromName}::${conn.toName}::${conn.relType}`;
+
+        const { path: elbowPath, bendPt } = buildElbowPath(
+            from, conn.fromEdge, to, conn.toEdge,
             conn.fromSlotIdx, conn.fromSlotTotal,
-            conn.toSlotIdx,   conn.toSlotTotal
+            bendKey
         );
+
+        const d = `M${from.x},${from.y} ${elbowPath} L${to.x},${to.y}`;
 
         switch (conn.relType) {
 
             case 'composition':
-                // Filled diamond at owner (source) end, no arrowhead at part end.
-                svg += `<path d="M${c.sx},${c.sy} ${c.elbowPath} L${c.ex},${c.ey}"
-                              fill="none" stroke="var(--arrow-comp)" stroke-width="1.4"
-                              marker-start="url(#m-comp)"/>`;
+                // Bidirectional: diamond at both ends.
+                // Unidirectional: filled diamond at owner (source), plain end at part.
+                if (conn.bidir) {
+                    svg += `<path d="${d}" fill="none" stroke="var(--arrow-comp)" stroke-width="1.4"
+                                    marker-start="url(#m-comp)" marker-end="url(#m-comp)"/>`;
+                } else {
+                    svg += `<path d="${d}" fill="none" stroke="var(--arrow-comp)" stroke-width="1.4"
+                                    marker-start="url(#m-comp)"/>`;
+                }
                 break;
 
             case 'aggregation':
-                // Hollow diamond at owner (source) end.
-                svg += `<path d="M${c.sx},${c.sy} ${c.elbowPath} L${c.ex},${c.ey}"
-                              fill="none" stroke="var(--arrow-agg)" stroke-width="1.2"
-                              marker-start="url(#m-agg)"/>`;
+                // Bidirectional: hollow diamond at both ends.
+                // Unidirectional: hollow diamond at owner (source), plain end at part.
+                if (conn.bidir) {
+                    svg += `<path d="${d}" fill="none" stroke="var(--arrow-agg)" stroke-width="1.2"
+                                    marker-start="url(#m-agg)" marker-end="url(#m-agg)"/>`;
+                } else {
+                    svg += `<path d="${d}" fill="none" stroke="var(--arrow-agg)" stroke-width="1.2"
+                                    marker-start="url(#m-agg)"/>`;
+                }
                 break;
 
             case 'depUse':
-                // Dashed blue line, open arrowhead at target, <<use>> label.
-                svg += `<path d="M${c.sx},${c.sy} ${c.elbowPath} L${c.ex},${c.ey}"
-                              fill="none" stroke="var(--arrow-dep-use)" stroke-width="1.1"
-                              stroke-dasharray="6 3" marker-end="url(#m-dep)"/>`;
-                svg += renderArrowLabel(c, '<<use>>', 'var(--arrow-dep-use)');
+                // Short-dashed blue line, open arrowhead at target, <<use>> label.
+                svg += `<path d="${d}" fill="none" stroke="var(--arrow-dep-use)" stroke-width="1.1"
+                                stroke-dasharray="6 3" marker-end="url(#m-dep)"/>`;
+                svg += renderArrowLabel(from, to, bendPt, '<<use>>', 'var(--arrow-dep-use)');
                 break;
 
             case 'depCreates':
-                // Dashed green line (longer dash), open arrowhead, <<creates>> label.
-                svg += `<path d="M${c.sx},${c.sy} ${c.elbowPath} L${c.ex},${c.ey}"
-                              fill="none" stroke="var(--arrow-dep-create)" stroke-width="1.1"
-                              stroke-dasharray="9 3" marker-end="url(#m-dep)"/>`;
-                svg += renderArrowLabel(c, '<<creates>>', 'var(--arrow-dep-create)');
+                // Long-dashed green line, open arrowhead, <<creates>> label.
+                svg += `<path d="${d}" fill="none" stroke="var(--arrow-dep-create)" stroke-width="1.1"
+                                stroke-dasharray="9 3" marker-end="url(#m-dep)"/>`;
+                svg += renderArrowLabel(from, to, bendPt, '<<creates>>', 'var(--arrow-dep-create)');
                 break;
 
             case 'implementation':
                 // Dashed line + hollow triangle arrowhead at interface end.
-                svg += `<path d="M${c.sx},${c.sy} ${c.elbowPath} L${c.ex},${c.ey}"
-                              fill="none" stroke="var(--arrow-impl)" stroke-width="1.2"
-                              stroke-dasharray="6 3" marker-end="url(#m-impl)"/>`;
+                svg += `<path d="${d}" fill="none" stroke="var(--arrow-impl)" stroke-width="1.2"
+                                stroke-dasharray="6 3" marker-end="url(#m-impl)"/>`;
                 break;
 
             case 'inheritance':
                 // Solid line + hollow triangle arrowhead at superclass end.
-                svg += `<path d="M${c.sx},${c.sy} ${c.elbowPath} L${c.ex},${c.ey}"
-                              fill="none" stroke="var(--arrow-inherit)" stroke-width="1.5"
-                              marker-end="url(#m-inh)"/>`;
+                svg += `<path d="${d}" fill="none" stroke="var(--arrow-inherit)" stroke-width="1.5"
+                                marker-end="url(#m-inh)"/>`;
                 break;
+        }
+
+        // Render the draggable bend handle for elbowed arrows.
+        // The handle is a small circle at the bend midpoint. It is invisible by
+        // default and appears on #diagram hover via CSS. Dragging it updates
+        // bendOffsets[bendKey] so future renders move the elbow accordingly.
+        if (bendPt) {
+            svg += `<circle class="bend-handle"
+                            cx="${bendPt.x}" cy="${bendPt.y}" r="5"
+                            data-bend-key="${escapeXml(bendKey)}"
+                            data-bend-axis="${(conn.fromEdge === 'top' || conn.fromEdge === 'bottom') ? 'vertical' : 'horizontal'}"/>`;
         }
     });
 
@@ -1539,7 +1933,7 @@ function renderBox(name) {
     const strokeC = isSelected ? 'var(--accent)' : 'var(--text-primary)';
     const strokeO = isSelected ? 0.9   : 0.25;
 
-    let svg = `<g data-class="${escapeXml(name)}" style="cursor:move">`;
+    let svg = `<g data-class="${escapeXml(name)}" class="uml-box">`;
 
     // ── Outer box shell ──────────────────────────────────────────────────────
     svg += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3"
@@ -1655,6 +2049,141 @@ function renderTitleBracket() {
 
 
 /**
+ * Build SVG markup for the draggable legend box rendered in world space.
+ *
+ * The legend is positioned in world coordinates so it participates in pan and
+ * zoom exactly like class boxes. On the first call it auto-places itself to the
+ * right of the class bounding box. The user can then drag it anywhere.
+ *
+ * Uses CSS custom properties directly (no pre-resolved colors) so it renders
+ * consistently with the rest of the canvas and gets resolved correctly during
+ * export by {@link buildExportSVG}.
+ *
+ * Returns '' when no relationships are present in the current diagram.
+ *
+ * @returns {string} SVG {@code <g>} element markup, or '' when nothing to show
+ */
+function renderLegendBox() {
+    const present = computePresentRelationships();
+    const ORDER   = ['inheritance', 'implementation', 'composition',
+                     'aggregation', 'depUse', 'depCreates'];
+    const types   = ORDER.filter(t => present.has(t));
+    if (!types.length) return '';
+ 
+    const LABELS = {
+        inheritance:    'extends',
+        implementation: 'implements',
+        composition:    'composition',
+        aggregation:    'aggregation',
+        depUse:         '<<use>>',
+        depCreates:     '<<creates>>',
+    };
+ 
+    const ROW_H   = 20;
+    const ICON_W  = 56;
+    const GAP     = 8;
+    const PAD     = 10;
+    const TITLE_H = 20;
+    const MID     = ROW_H / 2;
+    const boxW    = PAD + ICON_W + GAP + 82 + PAD;
+    const boxH    = TITLE_H + PAD + types.length * ROW_H + PAD;
+ 
+    // Auto-place to the right of the class bounding box on first appearance.
+    if (!legendPos) {
+        const bounds = computeWorldBounds();
+        legendPos = bounds
+            ? { x: bounds.maxX + 36, y: bounds.minY }
+            : { x: 30, y: 30 };
+    }
+ 
+    const { x, y } = legendPos;
+    const BG   = 'var(--bg-primary)';
+    const BD   = 'var(--border-hover)';
+    const TEXT = 'var(--text-secondary)';
+ 
+    /**
+     * Inline SVG icon for a single relationship type, using CSS variables.
+     *
+     * @param  {string} type - Relationship type identifier
+     * @param  {number} iy   - Y baseline for this icon row in world coordinates
+     * @returns {string}       SVG markup for the icon
+     */
+    function iconRow(type, iy) {
+        const my = iy + MID;
+        const ix = x + PAD;
+        switch (type) {
+            case 'inheritance':
+                return `<line x1="${ix+2}" y1="${my}" x2="${ix+40}" y2="${my}"
+                               stroke="var(--arrow-inherit)" stroke-width="1.5"/>
+                         <path d="M${ix+40},${iy+2} L${ix+51},${my} L${ix+40},${iy+ROW_H-2} Z"
+                               fill="${BG}" stroke="var(--arrow-inherit)" stroke-width="1.2"
+                               stroke-linejoin="round"/>`;
+            case 'implementation':
+                return `<line x1="${ix+2}" y1="${my}" x2="${ix+40}" y2="${my}"
+                               stroke="var(--arrow-impl)" stroke-width="1.2" stroke-dasharray="4 2"/>
+                         <path d="M${ix+40},${iy+2} L${ix+51},${my} L${ix+40},${iy+ROW_H-2} Z"
+                               fill="${BG}" stroke="var(--arrow-impl)" stroke-width="1.2"
+                               stroke-linejoin="round"/>`;
+            case 'composition':
+                return `<polygon points="${ix+2},${my} ${ix+10},${iy+2} ${ix+18},${my} ${ix+10},${iy+ROW_H-2}"
+                                 fill="var(--arrow-comp)" opacity="0.85"/>
+                         <line x1="${ix+18}" y1="${my}" x2="${ix+54}" y2="${my}"
+                               stroke="var(--arrow-comp)" stroke-width="1.4"/>`;
+            case 'aggregation':
+                return `<polygon points="${ix+2},${my} ${ix+10},${iy+2} ${ix+18},${my} ${ix+10},${iy+ROW_H-2}"
+                                 fill="${BG}" stroke="var(--arrow-agg)" stroke-width="1.2"
+                                 stroke-linejoin="round"/>
+                         <line x1="${ix+18}" y1="${my}" x2="${ix+54}" y2="${my}"
+                               stroke="var(--arrow-agg)" stroke-width="1.2"/>`;
+            case 'depUse':
+                return `<line x1="${ix+2}" y1="${my}" x2="${ix+42}" y2="${my}"
+                               stroke="var(--arrow-dep-use)" stroke-width="1.1" stroke-dasharray="5 2"/>
+                         <path d="M${ix+41},${iy+2} L${ix+51},${my} L${ix+41},${iy+ROW_H-2}"
+                               fill="none" stroke="var(--arrow-dep-use)" stroke-width="1.3"
+                               stroke-linecap="round" stroke-linejoin="round"/>`;
+            case 'depCreates':
+                return `<line x1="${ix+2}" y1="${my}" x2="${ix+42}" y2="${my}"
+                               stroke="var(--arrow-dep-create)" stroke-width="1.1" stroke-dasharray="8 2"/>
+                         <path d="M${ix+41},${iy+2} L${ix+51},${my} L${ix+41},${iy+ROW_H-2}"
+                               fill="none" stroke="var(--arrow-dep-create)" stroke-width="1.3"
+                               stroke-linecap="round" stroke-linejoin="round"/>`;
+            default: return '';
+        }
+    }
+ 
+    let g = `<g data-legend="true" class="uml-box">`;
+ 
+    // Background + border
+    g += `<rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="5"
+                fill="${BG}" stroke="${BD}" stroke-width="0.8" stroke-opacity="0.55"/>`;
+ 
+    // Title bar
+    g += `<rect x="${x}" y="${y}" width="${boxW}" height="${TITLE_H}" rx="5"
+                fill="var(--bg-secondary)" stroke="none"/>`;
+    g += `<rect x="${x}" y="${y + TITLE_H - 4}" width="${boxW}" height="4"
+                fill="var(--bg-secondary)" stroke="none"/>`;
+    g += `<text x="${x + PAD}" y="${y + TITLE_H * 0.72}"
+                font-family="sans-serif" font-size="10" font-weight="600"
+                fill="${TEXT}">Legend</text>`;
+    g += `<line x1="${x + 4}" y1="${y + TITLE_H}"
+                x2="${x + boxW - 4}" y2="${y + TITLE_H}"
+                stroke="${BD}" stroke-width="0.5" stroke-opacity="0.5"/>`;
+ 
+    // Relationship rows
+    types.forEach((type, i) => {
+        const iy = y + TITLE_H + PAD + i * ROW_H;
+        g += iconRow(type, iy);
+        g += `<text x="${x + PAD + ICON_W + GAP}" y="${iy + MID + 4}"
+                    font-family="sans-serif" font-size="10"
+                    fill="${TEXT}">${escapeXml(LABELS[type])}</text>`;
+    });
+ 
+    g += `</g>`;
+    return g;
+}
+
+
+/**
  * Re-render the complete diagram into the SVG world group.
  *
  * Applies the current {@link viewTransform}, then writes (in order):
@@ -1681,9 +2210,11 @@ function render() {
     );
 
     let svg = '';
+    svg += renderSections();
     svg += renderTitleBracket();
     svg += renderArrows();
     names.forEach(n => { svg += renderBox(n); });
+    svg += renderLegendBox();
     world.innerHTML = svg;
 }
 
@@ -1717,91 +2248,204 @@ function computeWorldBounds() {
 
 
 /**
+ * Build a standalone SVG legend group for use in exports.
+ *
+ * Unlike the sidebar legend (which uses CSS variables and HTML), this version
+ * uses only resolved color values so it renders correctly in any SVG viewer
+ * or PNG renderer. Each relationship type present in the current diagram gets
+ * one row with an inline icon and a text label.
+ *
+ * The group is positioned at the supplied (x, y) origin in the export canvas.
+ *
+ * @param  {CSSStyleDeclaration} cs      - Computed styles from the document root
+ * @param  {string}              bgColor - Resolved background color for the legend box fill
+ * @returns {string}                       SVG {@code <g>} element, or '' if no relationships exist
+ */
+function buildExportLegend(cs, bgColor) {
+    const present = computePresentRelationships();
+    const ORDER = ['inheritance', 'implementation', 'composition', 'aggregation', 'depUse', 'depCreates'];
+    const types = ORDER.filter(t => present.has(t));
+    if (!types.length) return '';
+
+    const LABELS = {
+        inheritance:    'extends',
+        implementation: 'implements',
+        composition:    'composition',
+        aggregation:    'aggregation',
+        depUse:         '<<use>>',
+        depCreates:     '<<creates>>',
+    };
+
+    // Resolve the colors we need once.
+    const r = prop => cs.getPropertyValue(prop).trim();
+    const C = {
+        inherit:  r('--arrow-inherit')    || '#2a2a28',
+        impl:     r('--arrow-impl')       || '#636360',
+        comp:     r('--arrow-comp')       || '#8b0000',
+        agg:      r('--arrow-agg')        || '#b85c00',
+        depU:     r('--arrow-dep-use')    || '#1450a0',
+        depC:     r('--arrow-dep-create') || '#1a7a1a',
+        text:     r('--text-secondary')   || '#6b6b67',
+        border:   r('--border-hover')     || 'rgba(0,0,0,0.28)',
+    };
+
+    const ROW_H  = 18;   // px per legend row
+    const ICON_W = 56;   // px width of the icon area
+    const GAP    = 6;    // px gap between icon and label
+    const PAD    = 10;   // px padding inside the legend box
+    const MID    = ROW_H / 2;
+
+    /**
+     * Build the SVG icon for a single relationship type using only resolved colors.
+     *
+     * @param  {string} type - Relationship type identifier
+     * @param  {number} y    - Vertical offset within the legend group
+     * @returns {string}       SVG elements for the icon row
+     */
+    function icon(type, y) {
+        const my = y + MID;
+        switch (type) {
+            case 'inheritance':
+                return `<line x1="${PAD+2}" y1="${my}" x2="${PAD+40}" y2="${my}"
+                               stroke="${C.inherit}" stroke-width="1.5"/>
+                         <path d="M${PAD+40},${y+2} L${PAD+51},${my} L${PAD+40},${y+ROW_H-2} Z"
+                               fill="${bgColor}" stroke="${C.inherit}" stroke-width="1.2"
+                               stroke-linejoin="round"/>`;
+            case 'implementation':
+                return `<line x1="${PAD+2}" y1="${my}" x2="${PAD+40}" y2="${my}"
+                               stroke="${C.impl}" stroke-width="1.2" stroke-dasharray="4 2"/>
+                         <path d="M${PAD+40},${y+2} L${PAD+51},${my} L${PAD+40},${y+ROW_H-2} Z"
+                               fill="${bgColor}" stroke="${C.impl}" stroke-width="1.2"
+                               stroke-linejoin="round"/>`;
+            case 'composition':
+                return `<polygon points="${PAD+2},${my} ${PAD+10},${y+2} ${PAD+18},${my} ${PAD+10},${y+ROW_H-2}"
+                                 fill="${C.comp}" opacity="0.85"/>
+                         <line x1="${PAD+18}" y1="${my}" x2="${PAD+54}" y2="${my}"
+                               stroke="${C.comp}" stroke-width="1.4"/>`;
+            case 'aggregation':
+                return `<polygon points="${PAD+2},${my} ${PAD+10},${y+2} ${PAD+18},${my} ${PAD+10},${y+ROW_H-2}"
+                                 fill="${bgColor}" stroke="${C.agg}" stroke-width="1.2"
+                                 stroke-linejoin="round"/>
+                         <line x1="${PAD+18}" y1="${my}" x2="${PAD+54}" y2="${my}"
+                               stroke="${C.agg}" stroke-width="1.2"/>`;
+            case 'depUse':
+                return `<line x1="${PAD+2}" y1="${my}" x2="${PAD+42}" y2="${my}"
+                               stroke="${C.depU}" stroke-width="1.1" stroke-dasharray="5 2"/>
+                         <path d="M${PAD+41},${y+2} L${PAD+51},${my} L${PAD+41},${y+ROW_H-2}"
+                               fill="none" stroke="${C.depU}" stroke-width="1.3"
+                               stroke-linecap="round" stroke-linejoin="round"/>`;
+            case 'depCreates':
+                return `<line x1="${PAD+2}" y1="${my}" x2="${PAD+42}" y2="${my}"
+                               stroke="${C.depC}" stroke-width="1.1" stroke-dasharray="8 2"/>
+                         <path d="M${PAD+41},${y+2} L${PAD+51},${my} L${PAD+41},${y+ROW_H-2}"
+                               fill="none" stroke="${C.depC}" stroke-width="1.3"
+                               stroke-linecap="round" stroke-linejoin="round"/>`;
+            default: return '';
+        }
+    }
+
+    const boxW = PAD + ICON_W + GAP + 68 + PAD;   // icon + gap + max label width + padding
+    const boxH = PAD + types.length * ROW_H + PAD;
+
+    let g = `<g id="export-legend">`;
+    // Background box
+    g += `<rect width="${boxW}" height="${boxH}" rx="5"
+                fill="${bgColor}" fill-opacity="0.92"
+                stroke="${C.border}" stroke-width="0.8"/>`;
+
+    types.forEach((type, i) => {
+        const y = PAD + i * ROW_H;
+        g += icon(type, y);
+        g += `<text x="${PAD + ICON_W + GAP}" y="${y + MID + 4}"
+                    font-family="sans-serif" font-size="10"
+                    fill="${C.text}">${escapeXml(LABELS[type])}</text>`;
+    });
+
+    g += `</g>`;
+    return g;
+}
+
+
+/**
  * Build a standalone, self-contained SVG string of the current diagram.
  *
  * CSS variables are resolved to their current computed values so the exported
  * file renders correctly in any SVG viewer without access to styles.css.
  * The title bracket is always included when {@link diagramTitle} is set,
- * regardless of the current viewport position.
+ * regardless of the current viewport position. The legend is placed in the
+ * bottom-left corner of the export canvas.
  *
  * @returns {string|null} Complete SVG document string, or null if nothing is loaded
  */
 function buildExportSVG() {
     const bounds = computeWorldBounds();
     if (!bounds) return null;
-
+ 
     const { minX, minY, maxX, maxY } = bounds;
     const PAD     = 40;
     const TITLE_H = diagramTitle ? 50 : 0;
     const viewW   = (maxX - minX) + PAD * 2;
     const viewH   = (maxY - minY) + PAD * 2 + TITLE_H;
-
-    // Resolve CSS custom properties to their current computed values
-    const cs = getComputedStyle(document.documentElement);
-    const v  = key => cs.getPropertyValue(key).trim();
-    const vars = {
-        'var(--bg-primary)':       v('--bg-primary')       || '#ffffff',
-        'var(--text-primary)':     v('--text-primary)')    || '#1a1a18',
-        'var(--accent)':           v('--accent)')           || '#185FA5',
-        'var(--hdr-class)':        v('--hdr-class)')        || '#f0efec',
-        'var(--hdr-class-text)':   v('--hdr-class-text)')  || '#1a1a18',
-        'var(--hdr-interface)':    v('--hdr-interface)')    || 'rgba(55,138,221,0.12)',
-        'var(--hdr-interface-text)': v('--hdr-interface-text)') || '#185FA5',
-        'var(--hdr-enum)':         v('--hdr-enum)')         || 'rgba(99,153,34,0.12)',
-        'var(--hdr-enum-text)':    v('--hdr-enum-text)')    || '#3B6D11',
-        'var(--hdr-abstract)':     v('--hdr-abstract)')     || 'rgba(127,119,221,0.12)',
-        'var(--hdr-abstract-text)':v('--hdr-abstract-text)')|| '#534AB7',
-        'var(--arrow-inherit)':    v('--arrow-inherit)')    || 'rgba(26,26,24,0.35)',
-        'var(--arrow-comp)':       v('--arrow-comp)')       || 'rgba(26,26,24,0.70)',
-        'var(--arrow-agg)':        v('--arrow-agg)')        || 'rgba(26,26,24,0.55)',
-        'var(--arrow-dep-use)':    v('--arrow-dep-use)')    || 'rgba(55,138,221,0.60)',
-        'var(--arrow-dep-create)': v('--arrow-dep-create)') || 'rgba(99,153,34,0.60)',
-    };
-
-    // Re-render all content at identity transform (no pan/zoom offset)
+ 
+    // Re-render all content at identity transform (no pan/zoom offset).
     const savedVT = { ...viewTransform };
     viewTransform = { tx: PAD + TITLE_H - minX, ty: PAD + TITLE_H - minY, sc: 1 };
-
-    let content = renderTitleBracket() + renderArrows();
+ 
+    let content = renderSections() + renderTitleBracket() + renderArrows();
     Object.keys(classMap).forEach(n => { content += renderBox(n); });
-
+ 
     viewTransform = savedVT;
-
-    // Replace CSS variable references with resolved values
-    Object.entries(vars).forEach(([k, val]) => {
-        content = content.replaceAll(k, val);
+ 
+    // Strip bend-handle circles — interactive UI only, not diagram content.
+    content = content.replace(/<circle class="bend-handle"[\s\S]*?\/>/g, '');
+ 
+    // Dynamically resolve every CSS custom property referenced in the rendered content.
+    // This is more robust than a manual list — it catches all variables including
+    // --uml-field-name, --uml-ctor-name, --arrow-impl, --text-primary, etc.
+    const cs = getComputedStyle(document.documentElement);
+    content = content.replace(/var\(--[\w-]+\)/g, match => {
+        const propName = match.slice(4, -1);     // strip 'var(' and ')'
+        const resolved = cs.getPropertyValue(propName).trim();
+        return resolved || match;
     });
-
-    // Build the final SVG document
-    const bgColor = vars['var(--bg-primary)'];
-    let svg = `<?xml version="1.0" encoding="UTF-8"?>\n`;
-    svg += `<svg xmlns="http://www.w3.org/2000/svg" `;
+ 
+    // Resolve the background color for the SVG background rect.
+    const bgColor = cs.getPropertyValue('--bg-primary').trim() || '#ffffff';
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" `;
     svg += `width="${viewW}" height="${viewH}" `;
     svg += `viewBox="0 0 ${viewW} ${viewH}">\n`;
-
+ 
     // Background
     svg += `  <rect width="${viewW}" height="${viewH}" fill="${bgColor}"/>\n`;
-
+ 
     // Arrow marker defs (using resolved colors)
-    const arrowColor  = vars['var(--arrow-inherit)'];
-    const compColor   = vars['var(--arrow-comp)'];
+    const arrowColor = cs.getPropertyValue('--arrow-inherit').trim() || '#2a2a28';
+    const compColor  = cs.getPropertyValue('--arrow-comp').trim()    || '#8b0000';
+    const aggColor   = cs.getPropertyValue('--arrow-agg').trim()     || '#b85c00';
+    const depUColor  = cs.getPropertyValue('--arrow-dep-use').trim() || '#1450a0';
+    const depCColor  = cs.getPropertyValue('--arrow-dep-create').trim() || '#1a7a1a';
     svg += `  <defs>\n`;
     svg += `    <marker id="ei" viewBox="0 0 12 12" refX="11.5" refY="6" markerWidth="10" markerHeight="10" orient="auto">
       <path d="M1 1L11 6L1 11Z" fill="${bgColor}" stroke="${arrowColor}" stroke-width="1.2"/></marker>\n`;
-    svg += `    <marker id="ec" viewBox="0 0 20 10" refX="0" refY="5" markerWidth="14" markerHeight="10" orient="auto">
-      <path d="M0 5 L9 0.5 L18 5 L9 9.5 Z" fill="${compColor}"/></marker>\n`;
-    svg += `    <marker id="ea" viewBox="0 0 20 10" refX="0" refY="5" markerWidth="14" markerHeight="10" orient="auto">
-      <path d="M0 5 L9 0.5 L18 5 L9 9.5 Z" fill="${bgColor}" stroke="${arrowColor}" stroke-width="1.2"/></marker>\n`;
+    svg += `    <marker id="ec" viewBox="0 0 22 12" refX="21" refY="6" markerWidth="16" markerHeight="12" orient="auto-start-reverse">
+      <path d="M1 6 L10 1 L19 6 L10 11 Z" fill="${compColor}"/></marker>\n`;
+    svg += `    <marker id="ea" viewBox="0 0 22 12" refX="21" refY="6" markerWidth="16" markerHeight="12" orient="auto-start-reverse">
+      <path d="M1 6 L10 1 L19 6 L10 11 Z" fill="${bgColor}" stroke="${aggColor}" stroke-width="1.2"/></marker>\n`;
     svg += `    <marker id="ed" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M1 1.5L8 5L1 8.5" fill="none" stroke="${arrowColor}" stroke-width="1.5" stroke-linecap="round"/></marker>\n`;
+      <path d="M1 1.5L8 5L1 8.5" fill="none" stroke="${depUColor}" stroke-width="1.5" stroke-linecap="round"/></marker>\n`;
+    svg += `    <marker id="edc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M1 1.5L8 5L1 8.5" fill="none" stroke="${depCColor}" stroke-width="1.5" stroke-linecap="round"/></marker>\n`;
     svg += `  </defs>\n`;
 
-    // Replace live marker IDs with export-specific IDs
+    // Replace live marker IDs with export-specific IDs.
+    // depCreates gets its own marker (edc) so it renders in green, not blue.
     content = content
         .replaceAll('url(#m-inh)',  'url(#ei)')
         .replaceAll('url(#m-impl)', 'url(#ei)')
         .replaceAll('url(#m-comp)', 'url(#ec)')
         .replaceAll('url(#m-agg)',  'url(#ea)')
+        .replace(/stroke-dasharray="9 3"[^/]*marker-end="url\(#m-dep\)"/g,
+                 m => m.replace('url(#m-dep)', 'url(#edc)'))
         .replaceAll('url(#m-dep)',  'url(#ed)');
 
     svg += `  <g transform="translate(${PAD - minX},${PAD + TITLE_H - minY})">\n`;
@@ -1847,20 +2491,18 @@ function exportPNG() {
     const svgStr = buildExportSVG();
     if (!svgStr) return;
 
-    const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
-    const url  = URL.createObjectURL(blob);
+    const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgStr);
 
-    const img  = new Image();
+    const img = new Image();
     img.onload = () => {
-        const scale  = 2;   // 2× for high-DPI screens
-        const canvas = document.createElement('canvas');
+        const scale   = 2;
+        const canvas  = document.createElement('canvas');
         canvas.width  = img.naturalWidth  * scale;
         canvas.height = img.naturalHeight * scale;
 
         const ctx = canvas.getContext('2d');
         ctx.scale(scale, scale);
         ctx.drawImage(img, 0, 0);
-        URL.revokeObjectURL(url);
 
         const pngUrl = canvas.toDataURL('image/png');
         const a      = document.createElement('a');
@@ -1868,11 +2510,11 @@ function exportPNG() {
         a.download   = (diagramTitle || 'uml-diagram') + '.png';
         a.click();
     };
-    img.onerror = () => {
-        console.error('PNG export failed: could not render SVG to canvas.');
-        URL.revokeObjectURL(url);
+    img.onerror = (e) => {
+        console.error('PNG export failed — SVG could not be rendered to canvas.', e);
+        console.debug('SVG preview (first 2000 chars):', svgStr.slice(0, 2000));
     };
-    img.src = url;
+    img.src = dataUrl;
 }
 
 
@@ -1921,15 +2563,39 @@ function handleFiles(files) {
  */
 function updateFileList() {
     const list = document.getElementById('file-list');
-    list.innerHTML = Object.values(classMap).map(cls => `
+ 
+    // Build the section <option> list once, reused for every class row.
+    const sectionOptions = sections.map(s =>
+        `<option value="${escapeXml(s.id)}">${escapeXml(s.name)}</option>`
+    ).join('');
+ 
+    list.innerHTML = Object.values(classMap).map(cls => {
+        const assigned = sectionAssignments[cls.name] || '';
+        return `
         <div class="file-item${selectedClass === cls.name ? ' selected' : ''}"
              onclick="selectClass('${escapeXml(cls.name)}')">
             <span class="file-name" title="${escapeXml(cls.name)}.java">${escapeXml(cls.name)}</span>
+            <select class="section-select"
+                    title="Assign to section"
+                    onclick="event.stopPropagation()"
+                    onchange="event.stopPropagation(); assignClassToSection('${escapeXml(cls.name)}', this.value)">
+                <option value="">—</option>
+                ${sectionOptions}
+            </select>
             <button class="remove-btn"
                     onclick="event.stopPropagation(); removeClass('${escapeXml(cls.name)}')"
                     title="Remove">×</button>
-        </div>
-    `).join('');
+        </div>`;
+    }).join('');
+ 
+    // Restore the selected value for each dropdown (innerHTML reset clears them).
+    Object.values(classMap).forEach(cls => {
+        const assigned = sectionAssignments[cls.name] || '';
+        const row  = list.querySelector(`[onclick*="${escapeXml(cls.name)}"]`);
+        if (!row) return;
+        const sel = row.querySelector('.section-select');
+        if (sel) sel.value = assigned;
+    });
 }
 
 
@@ -1976,7 +2642,16 @@ function removeClass(name) {
     delete classMap[name];
     delete positions[name];
     delete dims[name];
+    delete sectionAssignments[name];
     if (selectedClass === name) selectedClass = null;
+
+    // Remove any stored bend offsets that involve this class.
+    Object.keys(bendOffsets).forEach(k => {
+        if (k.startsWith(name + '::') || k.includes('::' + name + '::')) {
+            delete bendOffsets[k];
+            delete bendEdgeCache[k];
+        }
+    });
     autoLayout();
     render();
     updateFileList();
@@ -1990,11 +2665,17 @@ function removeClass(name) {
  * @returns {void}
  */
 function clearAll() {
-    classMap      = {};
-    positions     = {};
-    dims          = {};
-    selectedClass = null;
-    viewTransform = { tx: 30, ty: 30, sc: 1 };
+    classMap            = {};
+    positions           = {};
+    dims                = {};
+    sections            = [];
+    sectionAssignments  = {};
+    legendPos           = null;
+    selectedClass       = null;
+    viewTransform       = { tx: 30, ty: 30, sc: 1 };
+    Object.keys(bendOffsets).forEach(k => { delete bendOffsets[k]; });
+    Object.keys(bendEdgeCache).forEach(k => { delete bendEdgeCache[k]; });
+    updateSectionList();
     render();
     updateFileList();
     updateBottomPanel();
@@ -2091,6 +2772,40 @@ function clientToWorld(clientX, clientY) {
 // ── Mousedown: begin a box drag or a canvas pan ──────────────────────────────
 
 document.getElementById('diagram').addEventListener('mousedown', e => {
+    // ── Legend box drag ──────────────────────────────────────────
+    const legendEl = e.target.closest('[data-legend]');
+    if (legendEl) {
+        const wm = clientToWorld(e.clientX, e.clientY);
+        dragState = {
+            type:    'legend',
+            startMX: wm.x,   startMY: wm.y,
+            startLX: legendPos.x, startLY: legendPos.y,
+        };
+        document.getElementById('diagram').classList.add('dragging-box');
+        e.preventDefault();
+        return;
+    }
+
+    // ── Bend handle drag ─────────────────────────────────────────
+    const handleEl = e.target.closest('.bend-handle');
+    if (handleEl) {
+        const bendKey  = handleEl.getAttribute('data-bend-key');
+        const axis     = handleEl.getAttribute('data-bend-axis');
+        const wm       = clientToWorld(e.clientX, e.clientY);
+        dragState = {
+            type:        'bend',
+            bendKey,
+            axis,
+            startWorld:  axis === 'vertical' ? wm.y : wm.x,
+            startOffset: bendOffsets[bendKey] || 0,
+        };
+        document.getElementById('diagram').classList.add(
+            axis === 'vertical' ? 'dragging-bend-v' : 'dragging-bend-h'
+        );
+    e.preventDefault();
+    return;
+}
+
     const boxEl = e.target.closest('[data-class]');
 
     if (boxEl) {
@@ -2105,6 +2820,7 @@ document.getElementById('diagram').addEventListener('mousedown', e => {
             startMX: wm.x,  startMY: wm.y,
             startBX: pos.x,  startBY: pos.y
         };
+        document.getElementById('diagram').classList.add('dragging-box');
     } else {
         // Clicked on empty canvas — deselect and start a pan.
         if (selectedClass) { selectedClass = null; render(); updateFileList(); }
@@ -2127,6 +2843,18 @@ window.addEventListener('mousemove', e => {
     if (dragState.type === 'pan') {
         viewTransform.tx = dragState.startTX + (e.clientX - dragState.startMX);
         viewTransform.ty = dragState.startTY + (e.clientY - dragState.startMY);
+    } else if (dragState.type === 'bend') {
+        const wm    = clientToWorld(e.clientX, e.clientY);
+        const delta = dragState.axis === 'vertical'
+            ? wm.y - dragState.startWorld
+            : wm.x - dragState.startWorld;
+        bendOffsets[dragState.bendKey] = dragState.startOffset + delta;
+    } else if (dragState.type === 'legend') {
+        const wm = clientToWorld(e.clientX, e.clientY);
+        legendPos = {
+            x: dragState.startLX + (wm.x - dragState.startMX),
+            y: dragState.startLY + (wm.y - dragState.startMY),
+        };
     } else if (dragState.type === 'box') {
         const wm = clientToWorld(e.clientX, e.clientY);
         positions[dragState.name] = {
@@ -2141,7 +2869,14 @@ window.addEventListener('mousemove', e => {
 
 // ── Mouseup: end the current drag ────────────────────────────────────────────
 
-window.addEventListener('mouseup', () => { dragState = null; });
+window.addEventListener('mouseup', () => {
+    if (dragState && dragState.type === 'bend') {
+        document.exitPointerLock();
+    }
+    dragState = null;
+    const diag = document.getElementById('diagram');
+    diag.classList.remove('dragging-box', 'dragging-bend-v', 'dragging-bend-h');
+});
 
 
 // ── Wheel: zoom centred on the cursor position ───────────────────────────────
